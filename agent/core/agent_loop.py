@@ -8,14 +8,22 @@ core/agent_loop.py — The main OODA-style control loop.
 Design contracts
 ----------------
 * Every phase is independently logged and auditable.
+    每個階段都會獨立記錄並可供稽核。
 * Observation facts, Agent inferences, and Human decisions are stored
   in separate EvidenceKind buckets — they must never be fused.
+    觀測事實、代理推論與人類決策必須分開儲存於不同 EvidenceKind 桶中，不可混合。
 * An action is only executed if:
+    僅在以下條件成立時才可執行動作：
   - The tool is allowed by the Responsibility's ActionBoundary.
+        - 工具需通過 Responsibility 的 ActionBoundary 允許。
   - The risk level is within the autonomous threshold, OR approval exists.
+        - 風險等級在自治門檻內，或已取得核准。
 * After every execution, the Agent must re-observe (verify) before closing.
+    每次執行後，Agent 必須重新觀測（驗證）才能結案。
 * If max_retries is reached with no change in evidence, the loop stops.
+    若達到 max_retries 且證據無變化，流程必須停止。
 * The Agent cannot grant itself new permissions.
+    Agent 不得自行授與新權限。
 """
 
 from __future__ import annotations
@@ -50,19 +58,30 @@ logger = logging.getLogger(__name__)
 class AgentLoop:
     """
     The persistent DevOps Agent control loop.
+    持續型 DevOps Agent 控制迴圈。
 
     The Agent is not a script executor; it is a continuous responsibility
     carrier.  On each tick it:
+    Agent 不是腳本執行器，而是持續承擔責任的執行者。每次 tick 會執行：
 
     1. **Observes** — calls sensing tools and records raw evidence.
+         1. **觀測**：呼叫感測工具並記錄原始證據。
     2. **Detects gaps** — compares observations to goal thresholds.
+         2. **發現差距**：將觀測結果與目標門檻比較。
     3. **Creates tasks** — one task per gap, avoiding duplicates.
+         3. **建立任務**：每個差距建立一個任務，避免重複。
     4. **Plans** — chooses the best available tool action.
+         4. **規劃**：選擇最佳可用工具動作。
     5. **Checks permissions** — enforces ActionBoundary and approval rules.
+         5. **檢查權限**：套用 ActionBoundary 與核准規則。
     6. **Executes** — calls the tool if authorised.
+         6. **執行**：在授權通過時呼叫工具。
     7. **Verifies** — re-observes to confirm the gap is actually resolved.
+         7. **驗證**：重新觀測以確認差距確實已解決。
     8. **Updates the world model** — records the new state.
+         8. **更新世界模型**：記錄新狀態。
     9. **Escalates** — involves a human when stop conditions are met.
+         9. **升級處理**：達到停止條件時通知人員介入。
     """
 
     def __init__(
@@ -87,14 +106,16 @@ class AgentLoop:
         self._decisions: List[AgentDecision] = []
 
     # ------------------------------------------------------------------
-    # Public entry point
+    # Public entry point / 公開入口
     # ------------------------------------------------------------------
 
     def tick(self) -> Dict[str, Any]:
         """
         Execute one complete cycle of the agent loop across all responsibilities.
+        針對所有 responsibility 執行一個完整的 agent 迴圈週期。
 
         Returns a summary dict for monitoring / logging purposes.
+        回傳供監控/記錄使用的摘要字典。
         """
         summary: Dict[str, Any] = {
             "tick_at": datetime.now(timezone.utc).isoformat(),
@@ -119,13 +140,15 @@ class AgentLoop:
         return summary
 
     # ------------------------------------------------------------------
-    # Phase 1: Observe
+    # Phase 1: Observe / 階段 1：觀測
     # ------------------------------------------------------------------
 
     def _observe(self, resp: Responsibility) -> ObservationResult:
         """
         Call all sensing tools for a responsibility and collect raw evidence.
+        對單一 responsibility 呼叫所有感測工具並收集原始證據。
         Facts are stored as OBSERVATION evidence — never fused with inferences.
+        事實以 OBSERVATION 類型儲存，不可與推論混合。
         """
         observation = ObservationResult(responsibility_id=resp.responsibility_id)
 
@@ -155,11 +178,13 @@ class AgentLoop:
                 observation.raw_evidence.append(entry)
 
                 # Merge metrics from tool result into observation
+                # 將工具結果中的量測值整併到 observation
                 if isinstance(result.data, dict):
                     for k, v in result.data.items():
                         if isinstance(v, (int, float)):
                             observation.metric_values[k] = float(v)
                     # Allow tools to report asset statuses directly
+                    # 允許工具直接回報資產狀態
                     if "asset_statuses" in result.data:
                         observation.asset_statuses.update(result.data["asset_statuses"])
 
@@ -171,7 +196,7 @@ class AgentLoop:
         return observation
 
     # ------------------------------------------------------------------
-    # Phase 2: Detect gaps
+    # Phase 2: Detect gaps / 階段 2：差距偵測
     # ------------------------------------------------------------------
 
     def _detect_gaps(
@@ -179,7 +204,9 @@ class AgentLoop:
     ) -> List[Gap]:
         """
         Compare observation to goal thresholds and return discovered gaps.
+        比對 observation 與目標門檻，回傳發現的 gaps。
         Inferences (classification of gap severity) are stored as INFERENCE evidence.
+        推論（例如差距嚴重度分類）會以 INFERENCE 證據儲存。
         """
         gaps = resp.detect_gaps(observation)
         for gap in gaps:
@@ -199,13 +226,15 @@ class AgentLoop:
         return gaps
 
     # ------------------------------------------------------------------
-    # Phase 3: Create tasks
+    # Phase 3: Create tasks / 階段 3：建立任務
     # ------------------------------------------------------------------
 
     def _create_tasks(
         self, resp: Responsibility, gaps: List[Gap]
     ) -> List[TaskRecord]:
-        """Create a TaskRecord for each new Gap (deduplicated by gap_id)."""
+        """Create a TaskRecord for each new Gap (deduplicated by gap_id).
+        為每個新 Gap 建立 TaskRecord（以 gap_id 去重）。
+        """
         new_tasks: List[TaskRecord] = []
         for gap in gaps:
             if self.tasks.has_active_task_for_gap(gap.gap_id):
@@ -231,7 +260,9 @@ class AgentLoop:
     def _estimate_risk(resp: Responsibility, gap: Gap) -> RiskLevel:
         """
         Heuristic: map gap severity to a default risk level.
+        啟發式規則：將 gap 嚴重度映射為預設風險等級。
         The Responsibility's ActionBoundary may override this downstream.
+        後續仍可由 Responsibility 的 ActionBoundary 覆寫。
         """
         mapping = {
             "critical": RiskLevel.HIGH,
@@ -242,7 +273,7 @@ class AgentLoop:
         return mapping.get(gap.severity, RiskLevel.LOW)
 
     # ------------------------------------------------------------------
-    # Phase 4 & 5: Plan + permission check
+    # Phase 4 & 5: Plan + permission check / 階段 4 與 5：規劃與權限檢查
     # ------------------------------------------------------------------
 
     def _plan_and_check(
@@ -250,9 +281,12 @@ class AgentLoop:
     ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
         """
         Choose the best available tool action and verify permissions.
+        選擇最佳可用工具動作並驗證權限。
 
         Returns (tool_name, params) if authorised, or (None, None) if blocked.
+        若授權通過回傳 (tool_name, params)，否則回傳 (None, None)。
         The Agent can REQUEST new capabilities but cannot grant them itself.
+        Agent 可請求新能力，但不能自行授權。
         """
         for tool_name in resp.available_tools:
             if not resp.action_boundary.is_tool_allowed(tool_name):
